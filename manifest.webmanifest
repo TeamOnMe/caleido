@@ -1,0 +1,14 @@
+{
+  "name": "Калейд — калории и рацион",
+  "short_name": "Калейд",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f4f6f5",
+  "theme_color": "#0f766e",
+  "lang": "ru",
+  "icons": [
+    {"src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"}
+  ]
+}

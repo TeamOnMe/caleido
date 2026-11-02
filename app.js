@@ -373,9 +373,36 @@ function recipeHasForbidden(r, forbLower){
   });
 }
 
-// ---------- состояние ----------
+function migrateState(s){
+  try {
+    if (s.plan && Array.isArray(s.plan)) {
+      s.plan.forEach(day => {
+        if (day && Array.isArray(day.meals)) {
+          day.meals.forEach(meal => {
+            if (meal && typeof meal === "object" && (!meal.portions || typeof meal.portions !== "number" || meal.portions < 1)) {
+              const r = RECIPES.find(rec => rec.n === meal.name);
+              meal.portions = r ? (r.portions >= 1 ? r.portions : 1) : 1;
+            }
+          });
+        } else {
+          throw new Error("Invalid day structure");
+        }
+      });
+    } else {
+      s.plan = null;
+    }
+  } catch (e) {
+    s.plan = null;
+  }
+  if (typeof s.diary !== "object" || s.diary === null) s.diary = {};
+  if (s.view === undefined) s.view = "setup";
+  if (s.day === undefined) s.day = 0;
+  s.v = 2;
+  return s;
+}
 const LS = "caleidoscope_v1";
-let state = JSON.parse(localStorage.getItem(LS)||"null") || {params:null, seed:Date.now()%100000, plan:null, diary:{}, extra:{}, view:"setup", day:0};
+let state = JSON.parse(localStorage.getItem(LS)||"null") || {params:null, seed:Date.now()%100000, plan:null, diary:{}, extra:{}, view:"setup", day:0, v:2};
+if (state) state = migrateState(state);
 if(!state.swapN) state.swapN=0;
 if(!state.forbidden) state.forbidden=[];
 if(!state.customFoods) state.customFoods={};   // свои продукты: имя -> [kcal,p,f,c] на 100 г

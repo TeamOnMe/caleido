@@ -475,7 +475,15 @@ function renderPlan(dayIdx){
 function round1(v){ return Math.round(v*10)/10; }
 function MEAL_TAG(mi,total){ return total===4 ? ["Завтрак","Обед","Полдник","Ужин"][mi] : ["Завтрак","Обед","Ужин"][mi]; }
 
-// ---------- «+ Я поел»: ручной ввод еды поверх плана ----------
+function searchFoods(query){
+  const qToks = normFood(query).filter(w=>w.length>=2);
+  if(!qToks.length) return [];
+  const idx = allFoodsIndex();
+  return Object.keys(idx).filter(name=>{
+    const nToks = normFood(name);
+    return qToks.every(qt=>nToks.some(nt=>nt.startsWith(qt)));
+  }).slice(0,8);
+}
 let addCtx = null; // {dayIdx, mealIdx}
 function allFoodsIndex(){
   // единый индекс для поиска: справочник + рецепты + свои продукты
@@ -496,18 +504,14 @@ function openAddFood(dayIdx, mealIdx){
 }
 let lastMatch=null;
 $("addFoodName").addEventListener("input", ()=>{
-  const q = normFood($("addFoodName").value).join(" ");
+  const q = $("addFoodName").value;
   lastMatch=null;
-  const idx=allFoodsIndex();
   if(q.length<2){ $("addFoodNut").innerHTML='<p class="hint">Начните вводить название…</p>'; $("addFoodSave").disabled=true; return; }
-  const hits = Object.keys(idx).filter(name=>{
-    const t=normFood(name);
-    return t.some(w=>w.startsWith(q)||q.includes(w));
-  }).slice(0,8);
+  const hits = searchFoods(q);
   if(!hits.length){ showCustomForm("Продукт не найден в базе. Введите КБЖУ на 100 г сами — сохраним его в ваши продукты."); $("addFoodSave").disabled=false; return; }
   // показываем варианты; клик по варианту фиксирует
   $("addFoodNut").innerHTML='<div class="suggests">'+hits.map(h=>
-    `<button class="sug" data-food="${h.replace(/"/g,"&quot;")}">${h} <span>${Math.round(idx[h][0])} ккал/100г</span></button>`).join("")+"</div>";
+    `<button class="sug" data-food="${h.replace(/"/g,"&quot;")}">${h} <span>${Math.round(allFoodsIndex()[h][0])} ккал/100г</span></button>`).join("")+"</div>";
   $("addFoodNut").querySelectorAll(".sug").forEach(b=>b.onclick=()=>chooseFood(b.dataset.food));
 });
 function chooseFood(name){

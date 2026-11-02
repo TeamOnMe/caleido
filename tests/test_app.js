@@ -21,7 +21,7 @@ const sandbox = { localStorage, document:documentMock, window:{scrollTo(){}}, na
 sandbox.globalThis = sandbox;
 const code = fs.readFileSync(__dirname + "/../app.js", "utf8")
   // экспорт для тестов: const-объявления не попадают в sandbox глобал через vm — пробрасываем их на globalThis
-  + "\n;globalThis.__X={RECIPES,FOODS,SHOP,EXTRA_FOODS,state,genWeek,recipeHasForbidden,buildMeal,swapMeal,priceOf,storeSearchUrl,buildShoppingList,normFood,calcTargets};";
+  + "\n;globalThis.__X={RECIPES,FOODS,SHOP,EXTRA_FOODS,state,genWeek,recipeHasForbidden,buildMeal,swapMeal,priceOf,storeSearchUrl,buildShoppingList,normFood,calcTargets,searchFoods};";
 vm.createContext(sandbox);
 try { vm.runInContext(code, sandbox, {filename:"app.js"}); } catch(e){ console.error("LOAD FAIL:", e.message); process.exit(1); }
 Object.assign(sandbox, sandbox.__X);
@@ -106,6 +106,12 @@ if(ovs){
 } else console.log("(в этом плане нет овсянки — пропускаю ценовые проверки частично)");
 T("ссылка Пятёрочка формата 5ka.ru/search/?text=", S.storeSearchUrl("5ka","Молоко 2.5%").startsWith("https://5ka.ru/search/?text="));
 T("ссылка Магнит формата magnit.ru/search/?query=", S.storeSearchUrl("magnit","Молоко 2.5%").startsWith("https://magnit.ru/search/?query="));
+
+// ---------- поиск продуктов в «+ Я поел» ----------
+T("searchFoods('багет с маком') → пустой массив", S.searchFoods('багет с маком').length===0);
+T("searchFoods('ябл') содержит 'Яблоки'", S.searchFoods('ябл').some(h=>h==='Яблоки'));
+T("searchFoods('молок') не пустой", S.searchFoods('молок').length>0);
+T("searchFoods('чай с сах') содержит 'Чай с сахаром'", S.searchFoods('чай с сах').some(h=>h==='Чай с сахаром'));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail?1:0);

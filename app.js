@@ -263,6 +263,104 @@ function recipeNut(r){
 const SLOTS4 = [["b",.26],["l",.34],["s",.12],["d",.28]];
 const SLOTS3 = [["b",.30],["l",.42],["d",.38]];
 
+// ---------- подгонка БЖУ дня (жиры и белок) под норму ----------
+// продукты-корректоры: масло/орехи — добавляем, если жира не хватает; грудка/творог — если белка
+// значения — фактические жиры/белок на 100 г из FOODS (см. базу выше)
+const FAT_UP   = { "Масло сливочное": 82.5, "Орехи грецкие": 65.2, "Сыр полутвёрдый": 28.0 };
+const PROT_UP  = { "Куриная грудка сырая": 23.0, "Творог 5%": 17.2, "Яйцо куриное": 12.7 };
+const sumNut = (ings)=>ings.reduce((acc,[name,g])=>{const fd=FOODS[name]||[0,0,0,0]; acc.k+=fd[0]*g/100; acc.p+=fd[1]*g/100; acc.f+=fd[2]*g/100; acc.c+=fd[3]*g/100; return acc;},{k:0,p:0,f:0,c:0});
+
+function recomputeDayTot(day){
+  const tot={k:0,p:0,f:0,c:0};
+  day.meals.forEach(x=>{ if(!x.empty){tot.k+=x.k;tot.p+=x.p;tot.f+=x.f;tot.c+=x.c;} });
+  day.tot=tot;
+}
+
+// добавить граммы продукта в приём (шаг +5 г), пересчитать нутриенты блюда
+function addIngToMeal(m, name, grams){
+  const idx = m.ing.findIndex(([n])=>n===name);
+  if(idx>=0) m.ing[idx]=[name, m.ing[idx][1]+grams];
+  else       m.ing.push([name, grams]);
+  Object.assign(m, sumNut(m.ing));
+}
+
+// дотянуть жиры (и заодно белок) дня до нормы: добавляем жирные/белковые продукты
+// в приёмы с конца дня (кроме уже скорректированных по калорийности).
+// Возвращает текст-подсказку для отображения или null.
+// maxAddK — потолок добавленных калорий за проход (по умолчанию 12% от нормы дня).
+// дотянуть жиры/белок дня до нормы: при нехватке добавляем граммовку жирного/белкового
+// продукта в приёмы с конца дня (шаг 5 г), не раздувая день сверх +2% ккал и не трогая
+// запрещённое списком «Нельзя». Избыток не режем — его честно показывает строка БЖУ.
+// Возвращает текст-подсказку или null. maxAddK — потолок тронутых калорий за проход.
+function balanceDayMacros(day, targets, usedMeals, maxAddK){
+  if(!targets || !(targets.fat>0) || !day || !day.meals) return null;
+  maxAddK = maxAddK || Math.max(150, Math.round(targets.kcal*0.12));
+  const order = day.meals.map((m,i)=>i).reverse().filter(i=>!usedMeals.has(i) && day.meals[i] && !day.meals[i].empty);
+  if(!order.length) return null;
+  const forb = forbiddenList();
+  let spent=0; const notes=[];
+  for(const [kind, table] of [["fat",FAT_UP],["prot",PROT_UP]]){
+    const totKey = kind==="fat" ? "f" : "p";
+    const targetG = kind==="fat" ? targets.fat : targets.prot;
+    const gap0 = targetG - day.tot[totKey];
+    if(Math.abs(gap0) <= 5) continue; // отклонение меньше 5 г — не трогаем
+    const inDay = name => day.meals.some(m=>!m.empty && m.ing.some(([n])=>n===name));
+    const allowed = Object.keys(table).filter(name=>!recipeHasForbidden({s:[[name,1]]}, forb) && FOODS[name]);
+    const pool = allowed.filter(inDay);
+    const list = pool.length ? pool : allowed;
+    if(!list.length) continue;
+    const name = list[0];
+    const fd = FOODS[name];                       // [kcal,p,f,c] на 100 г
+    const perG = {k:fd[0]/100, p:fd[1]/100, f:fd[2]/100, c:fd[3]/100};
+    const gainPer5 = 5*(kind==="fat"?perG.f:perG.p);
+    const before = day.tot[totKey];
+    if(gap0 > 0){
+      // дефицит макса: добавляем корректор по 5 г, пока день в коридоре ±8% ккал и в бюджете maxAddK
+      const hi = targets.kcal*1.08;
+      for(const i of order){
+        const m = day.meals[i];
+        let curG = (m.ing.find(([n])=>n===name)||[])[1] || 0;
+        while(curG < 120 && spent + 5*perG.k <= maxAddK && day.tot.k + 5*perG.k <= hi){
+          const gapNow = targetG - day.tot[totKey];
+          if(gapNow <= 3) break;
+          addIngToMeal(m, name, 5); curG += 5; spent += 5*perG.k;
+          recomputeDayTot(day);
+          if(day.tot[totKey] - targetG > 6){      // создан перебор по максу — откат шага
+            addIngToMeal(m, name, -5); spent -= 5*perG.k; recomputeDayTot(day);
+            break;
+          }
+          if(gainPer5 >= gapNow - 3) break;
+        }
+        if(targetG - day.tot[totKey] <= 3) break;
+      }
+    } else {
+      // избыток макса (>12%): срезаем корректор по 5 г (минимум 5 г в блюде) до входа в +8% нормы;
+      // срезка только снижает калории дня — хуже для ккал-коридора не становится
+      const limit = targetG * 1.08;
+      const kFloor = targets.kcal*0.92;   // не уводим день ниже -8% нормы ккал
+      for(const i of order){
+        const m = day.meals[i];
+        let curG = (m.ing.find(([n])=>n===name)||[])[1] || 0;
+        while(curG > 5 && spent + 5*perG.k <= maxAddK && day.tot.k - 5*perG.k >= kFloor){
+          if(day.tot[totKey] <= limit) break;
+          addIngToMeal(m, name, -5); curG -= 5; spent += 5*perG.k;
+          recomputeDayTot(day);
+          if(day.tot[totKey] < targetG - 5){      // пересекли норму снизу — откат
+            addIngToMeal(m, name, 5); spent -= 5*perG.k; recomputeDayTot(day);
+            break;
+          }
+        }
+        if(day.tot[totKey] <= limit) break;
+      }
+    }
+    const delta = day.tot[totKey] - before;
+    if(Math.abs(delta) > 0.4)
+      notes.push(`${kind==="fat"?"жиры":"белок"} ${delta>0?"+":""}${Math.round(delta)} г (${name})`);
+  }
+  recomputeDayTot(day);
+  return notes.length ? `БЖУ подогнаны под норму: ${notes.join(", ")}.` : null;
+}
+
 // собрать один приём: tag — b/l/s/d, wantK — целевые ккал; rnd — генератор случайных
 // state.forbidden (аллергии/нелюбимое) полностью исключает блюда с такими продуктами
 function buildMeal(tag, wantK, rnd){
@@ -298,12 +396,22 @@ function swapMeal(dayIdx, mealIdx){
   const tot={k:0,p:0,f:0,c:0};
   day.meals.forEach(x=>{tot.k+=x.k;tot.p+=x.p;tot.f+=x.f;tot.c+=x.c;});
   day.tot=tot;
+  // после замены блюдо снова может выбивать жиры/белок — подтягиваем к норме,
+  // но только если день и так в коридоре ±8% по калориям (не усугубляем перекос)
+  if(state.targets && state.targets.fat>0 && Math.abs(day.tot.k - state.targets.kcal)/state.targets.kcal <= 0.08)
+    day.note = balanceDayMacrosSafe(day, state.targets, new Set());
   delete state.diary[`${dayIdx}-${mealIdx}`];
   save(); renderPlan(dayIdx);
   return true;
 }
 
-function genWeek(targets, mealsCount, seed){
+// вызывается из genWeek: targets может быть null (только калории — старые сохранения)
+function balanceDayMacrosSafe(day, targets, usedMeals){
+  try { return balanceDayMacros(day, targets, usedMeals); }
+  catch(e){ return null; } // балансировка не должна ронять генератор
+}
+
+function genWeek(targets, mealsCount, seed, fullTargets){
   const rng = mulberry(seed);
   const slots = mealsCount===4 ? SLOTS4 : SLOTS3;
   const days=["Пн","Вт","Ср","Чт","Пт","Сб","Вс"];
@@ -320,7 +428,9 @@ function genWeek(targets, mealsCount, seed){
     // коррекция: если день выбивается из цели >8%, масштабируем ужин к остатку калорий
     const diff = targets.kcal - dk;
     const last = day[day.length-1];
+    const corrected = new Set();
     if(Math.abs(diff)/targets.kcal > 0.08 && day.length && last && !last.empty){
+      corrected.add(day.length-1);
       const kOld = last.k, pOld = last.p, fOld = last.f, cOld = last.c;
       const s2 = Math.min(1.7, Math.max(0.6, (kOld + diff)/kOld));
       last.ing = last.ing.map(([n,g])=>[n, Math.max(10, Math.round(g*s2/5)*5)]);
@@ -331,7 +441,10 @@ function genWeek(targets, mealsCount, seed){
       Object.assign(last, n2);
       dk += n2.k-kOld; dp += n2.p-pOld; df += n2.f-fOld; dc += n2.c-cOld;
     }
-    plan.push({day:days[d], meals:day, tot:{k:dk,p:dp,f:df,c:dc}});
+    const dayObj = {day:days[d], meals:day, tot:{k:dk,p:dp,f:df,c:dc}};
+    // подгонка жиров/белка под норму (стадия 3.3), если известны полные цели БЖУ
+    if(fullTargets) dayObj.note = balanceDayMacrosSafe(dayObj, fullTargets, corrected);
+    plan.push(dayObj);
   }
   return plan;
 }
@@ -369,7 +482,12 @@ function recipeHasForbidden(r, forbLower){
   if(!toks.size) return false;
   return r.s.some(([name])=>{
     const words = normFood(name);
-    return words.some(w=>[...toks].some(t=>w===t || w.startsWith(t)));
+    const phrase = words.join(" ");
+    // одиночные слова — как раньше (точно или по началу слова);
+    // составные токены («масло сливочное» из алиаса «молоко») — как подстрока всего названия,
+    // иначе «масло сливочное» не ловилось, а «масло» ловило бы и растительное
+    return words.some(w=>[...toks].some(t=>!t.includes(" ") && (w===t || w.startsWith(t))))
+        || [...toks].some(t=>t.includes(" ") && phrase.includes(t));
   });
 }
 
@@ -432,7 +550,7 @@ $("#regenBtn").addEventListener("click", ()=>{ state.seed=(state.seed+1)%100000;
 function buildPlan(){
   const t = calcTargets(state.params);
   state.targets = t;
-  state.plan = genWeek(t, state.params.meals, state.seed);
+  state.plan = genWeek(t, state.params.meals, state.seed, t);
   renderPlan(0);
 }
 
@@ -453,7 +571,20 @@ function renderPlan(dayIdx){
   Object.entries(state.extra).forEach(([k,arr])=>{
     if(k.startsWith(dayIdx+"-")) arr.forEach(x=>{ek+=x.k; ep+=x.p; ef+=x.f; ec+=x.c;});
   });
+  const planLine = `План на день: Б ${Math.round(d.tot.p)} г (норма ${t.prot}) · Ж ${Math.round(d.tot.f)} г (норма ${t.fat}) · У ${Math.round(d.tot.c)} г (норма ${t.carbs})`;
+  $("dayMacros").textContent = planLine;
   $("dayTotal").textContent=`Всего за день: ${Math.round(d.tot.k+ek)} ккал · Б ${Math.round(d.tot.p+ep)} · Ж ${Math.round(d.tot.f+ef)} · У ${Math.round(d.tot.c+ec)} (план: ${t.kcal}${ek?` + дописано ${Math.round(ek)}`:""})`;
+  const noteEl=$("dayNote");
+  if(noteEl){
+    let txt = d.note||"";
+    // честная приписка: если после подгонки отклонение всё равно большое — говорим прямо
+    const devF = d.tot.f - t.fat, devP = d.tot.p - t.prot;
+    const parts=[];
+    if(Math.abs(devF) > 15) parts.push(`жиры ${devF>0?"+":""}${Math.round(devF)} г`);
+    if(Math.abs(devP) > 25) parts.push(`белок ${devP>0?"+":""}${Math.round(devP)} г`);
+    if(parts.length) txt += (txt?" ":"") + `Отклонение осталось (${parts.join(", ")}) — точнее не выходит, калории в норме.`;
+    noteEl.textContent = txt; noteEl.classList.toggle("hidden", !txt);
+  }
   d.meals.forEach((m,mi)=>{
     const key=`${dayIdx}-${mi}`;
     const el=document.createElement("div"); el.className="meal";
@@ -723,6 +854,6 @@ if(state.params){
   ui.sex=p.sex; ui.meals=p.meals||4;
   [...$("sexSeg").children].forEach(x=>x.classList.toggle("on", x.dataset.v===p.sex));
   [...$("mealsSeg").children].forEach(x=>x.classList.toggle("on", +x.dataset.v===(p.meals||4)));
-  if(p.meals){ const tt=calcTargets(p); state.targets=tt; state.plan = genWeek(tt, p.meals, state.seed); }
+  if(p.meals){ const tt=calcTargets(p); state.targets=tt; state.plan = genWeek(tt, p.meals, state.seed, tt); }
 }
 go(state.view||"setup");

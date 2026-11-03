@@ -21,7 +21,7 @@ const sandbox = { localStorage, document:documentMock, window:{scrollTo(){}}, na
 sandbox.globalThis = sandbox;
 const code = fs.readFileSync(__dirname + "/../app.js", "utf8")
   // экспорт для тестов: const-объявления не попадают в sandbox глобал через vm — пробрасываем их на globalThis
-  + "\n;globalThis.__X={RECIPES,FOODS,SHOP,EXTRA_FOODS,state,genWeek,recipeHasForbidden,buildMeal,swapMeal,priceOf,storeSearchUrl,buildShoppingList,normFood,calcTargets,searchFoods,migrateState};";
+  + "\n;globalThis.__X={RECIPES,FOODS,SHOP,EXTRA_FOODS,state,genWeek,recipeHasForbidden,buildMeal,swapMeal,priceOf,storeSearchUrl,buildShoppingList,normFood,calcTargets,searchFoods,migrateState,balanceDayMacros,recomputeDayTot,sumNut,FAT_UP,PROT_UP};";
 vm.createContext(sandbox);
 try { vm.runInContext(code, sandbox, {filename:"app.js"}); } catch(e){ console.error("LOAD FAIL:", e.message); process.exit(1); }
 Object.assign(sandbox, sandbox.__X);
@@ -92,6 +92,92 @@ S.state.forbidden=["ихтиознесущее"]; // несуществующе�
 T("фильтр: неизвестное слово ничего не убирает",
   JSON.stringify(S.genWeek({kcal:2500},4,12345).map(d=>d.meals.map(m=>m.name))) ===
   JSON.stringify((()=>{S.state.forbidden=[]; return S.genWeek({kcal:2500},4,12345).map(d=>d.meals.map(m=>m.name));})()));
+
+
+// ---------- стадия 3.3: подгонка БЖУ дня под норму ----------
+const T33 = {kcal:2500, prot:150, fat:80, carbs:300};
+S.state.forbidden=[];
+// дефицит жиров: синтетический день из постных блюд (~1550 ккал, ~26 г жиров при норме 80);
+// балансировка должна заметно подтянуть жиры и не раздуть калории выше потолка
+(function(){
+  S.state.forbidden=[];
+  const mkMeal = (name, ing)=>{ const m={name, steps:[], ing, portions:1}; Object.assign(m, S.sumNut(ing)); return m; };
+  const day = {day:"Пн", meals:[
+    mkMeal("Грудка с гречкой",   [["Куриная грудка сырая",150],["Гречка сухая",70]]),
+    mkMeal("Минтай с рисом",     [["Минтай",180],["Рис белый сухой",80]]),
+    mkMeal("Грудка с картофелем",[["Куриная грудка сырая",150],["Картофель",250]]),
+    mkMeal("Творог с яйцом",     [["Творог 5%",200],["Яйцо куриное",55]]),
+  ]};
+  S.recomputeDayTot(day);
+  const fBefore = day.tot.f, kBefore = day.tot.k;
+  const note = S.balanceDayMacros(day, T33, new Set());
+  T("балансировка: жиры заметно выросли к норме", day.tot.f > fBefore + 8 && Math.abs(day.tot.f-T33.fat) < Math.abs(fBefore-T33.fat));
+  T("балансировка: есть подсказка в note", typeof note === "string" && /жиры \+\d+ г/.test(note));
+  T("балансировка: калории не раздуты выше потолка", day.tot.k <= Math.max(kBefore, T33.kcal*1.021));
+})();
+// переизбыток жиров: добавим масла сверх меры
+(function(){
+  const plan = S.genWeek(T33, 4, 777, null);
+  const day = JSON.parse(JSON.stringify(plan[0]));
+  const last = day.meals[day.meals.length-1];
+  last.ing.push(["Масло сливочное", 60]);
+  Object.assign(last, {k:last.k+734*0.6, f:last.f+82.5*0.6});
+  S.recomputeDayTot(day);
+  const fBefore = day.tot.f;
+  if(fBefore - T33.fat > 12){
+    const note = S.balanceDayMacros(day, T33, new Set());
+    T("балансировка: избыток жиров срезан", day.tot.f < fBefore - 3);
+  } else console.log("(избыток не достигнут в этом дне — пропускаю проверку срезки)");
+})();
+// калории дня не раздуваются выше +8% нормы
+(function(){
+  let worst = 0;
+  for(const seed of [1,7,42,99,123]){
+    const plan = S.genWeek(T33, 4, seed, T33);
+    plan.forEach(d=>{ worst = Math.max(worst, Math.abs(d.tot.k-T33.kcal)/T33.kcal); });
+  }
+  T("после балансировки ккал дня в коридоре ±8%", worst <= 0.081);
+})();
+// аллергии соблюдаются и при балансировке: корректор не должен быть запрещён
+// («молоко» ловит алиасом масло/сыр/творог — ни один корректор не проходит фильтр)
+(function(){
+  S.state.forbidden=["молоко"];
+  // молочное (в т.ч. масло сливочное через алиас) не должно появиться/вырасти;
+  // орехи/грудка/яйцо — не молочные, балансировка вправе их добавлять
+  const forb = ["Масло сливочное","Сыр полутвёрдый","Творог 5%","Молоко 2.5%","Сметана (или йогурт)","Кефир 1%","Йогурт классический"];
+  let addedForbidden = false;
+  for(const seed of [1,7,42,99,123]){
+    const base = S.genWeek(T33, 4, seed, null);   // план без балансировки
+    const bal  = S.genWeek(T33, 4, seed, T33);    // с балансировкой
+    for(let d=0;d<7;d++){
+      const cnt = (plan,name)=>plan[d].meals.reduce((s,m)=>s+(m.empty?0:m.ing.filter(([n])=>n===name).reduce((a,[,g])=>a+g,0)),0);
+      for(const name of forb)
+        if(cnt(bal,name) > cnt(base,name)+0.001) addedForbidden = true;
+    }
+  }
+  T("балансировка не добавляет запрещённое молокопродукты/корректоры", !addedForbidden);
+  S.state.forbidden=[];
+})();
+// корректор приоритетно берётся из продуктов, уже лежащих в дне (не плодит новых покупок)
+(function(){
+  const plan = S.genWeek(T33, 4, 42, null);
+  const day = JSON.parse(JSON.stringify(plan[6])); // Вс: часто нехватка жиров
+  const namesBefore = new Set();
+  day.meals.forEach(m=>{ if(!m.empty) m.ing.forEach(([n])=>namesBefore.add(n)); });
+  S.balanceDayMacros(day, T33, new Set());
+  const added = [];
+  day.meals.forEach(m=>{ if(!m.empty) m.ing.forEach(([n])=>{ if(!namesBefore.has(n)) added.push(n); }); });
+  T("балансировка не добавляет новых продуктов в покупки", added.length===0);
+})();
+// swapMeal после замены тоже балансирует (если день в коридоре ккал)
+(function(){
+  S.state.params={meals:4}; S.state.targets=T33; S.state.seed=12345; S.state.diary={}; S.state.swapN=0;
+  S.state.plan = S.genWeek(T33, 4, 12345, T33);
+  const okSwap = S.swapMeal(0,1);
+  const d0 = S.state.plan[0];
+  T("swap: план остался валидным после замены+балансировки",
+    okSwap && d0.meals.length===4 && d0.tot.k>0 && isFinite(d0.tot.f));
+})();
 
 // ---------- покупки: цены ----------
 S.state.forbidden=[];
